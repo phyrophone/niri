@@ -1197,10 +1197,19 @@ mod tests {
                         hot_corners: Some(
                             HotCorners {
                                 off: true,
-                                top_left: true,
-                                top_right: true,
-                                bottom_left: true,
-                                bottom_right: true,
+                                push_threshold: None,
+                                top_left: Some(
+                                    Default,
+                                ),
+                                top_right: Some(
+                                    Default,
+                                ),
+                                bottom_left: Some(
+                                    Default,
+                                ),
+                                bottom_right: Some(
+                                    Default,
+                                ),
                             },
                         ),
                         layout: None,
@@ -1666,10 +1675,17 @@ mod tests {
                 },
                 hot_corners: HotCorners {
                     off: false,
-                    top_left: false,
-                    top_right: false,
-                    bottom_left: false,
-                    bottom_right: false,
+                    push_threshold: Some(
+                        FloatOrInt(
+                            100.0,
+                        ),
+                    ),
+                    top_left: Some(
+                        Default,
+                    ),
+                    top_right: None,
+                    bottom_left: None,
+                    bottom_right: None,
                 },
             },
             overview: Overview {

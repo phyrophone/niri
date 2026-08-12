@@ -23,6 +23,7 @@ gestures {
 
     hot-corners {
         // off
+        // push-threshold 200
         top-left
         // top-right
         // bottom-left
@@ -111,5 +112,27 @@ gestures {
     }
 }
 ```
+
+<sup>Since: next release</sup> Other actions can be assigned to hot corners.
+```kdl
+gestures {
+    hot-corners {
+        top-left // defaults to: top-left { toggle-overview; }
+        bottom-left { spawn-sh "~/myAwesomeScript.sh"; }
+    }
+}
+```
+
+<sup>Since: next release</sup> How much force is needed to trigger hot corners can be set. 
+```kdl
+gestures {
+    hot-corners {
+        push-threshold 200
+        // set it to zero to make it instant
+        // push-threshold 0
+    }
+}
+``` 
+
 
 You can also customize hot corners per-output [in the output config](./Configuration:-Outputs.md#hot-corners).

@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use calloop::timer::{TimeoutAction, Timer};
 use input::event::gesture::GestureEventCoordinates as _;
+use niri_config::gestures::HOT_CORNER_PUSH_THRESHOLD;
 use niri_config::{
     Action, Bind, Binds, Config, Key, ModKey, Modifiers, MruDirection, SwitchBinds, Trigger,
 };
@@ -69,6 +70,7 @@ pub mod touch_resize_grab;
 use backend_ext::{NiriInputBackend as InputBackend, NiriInputDevice as _};
 
 pub const DOUBLE_CLICK_TIME: Duration = Duration::from_millis(400);
+const DEFAULT_HOT_CORNER_ACTION: Action = Action::ToggleOverview;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TabletData {
@@ -2414,7 +2416,7 @@ impl State {
     fn on_pointer_motion<I: InputBackend>(&mut self, event: I::PointerMotionEvent) {
         let was_inside_hot_corner = self.niri.pointer_inside_hot_corner;
         // Any of the early returns here mean that the pointer is not inside the hot corner.
-        self.niri.pointer_inside_hot_corner = false;
+        self.niri.pointer_inside_hot_corner = None;
 
         // We need an output to be able to move the pointer.
         if self.niri.global_space.outputs().next().is_none() {
@@ -2425,10 +2427,12 @@ impl State {
 
         let pointer = self.niri.seat.get_pointer().unwrap();
 
+        let delta = event.delta();
+
         let pos = pointer.current_location();
 
         // We have an output, so we can compute the new location and focus.
-        let mut new_pos = pos + event.delta();
+        let mut new_pos = pos + delta;
 
         // We received an event for the regular pointer, so show it now.
         self.niri.pointer_visibility = PointerVisibility::Visible;
@@ -2623,17 +2627,51 @@ impl State {
 
         pointer.frame(self);
 
+        if under.hot_corner != was_inside_hot_corner {
+            self.niri.hot_corner_triggered = false;
+            self.niri.hot_corner_push = None;
+        }
+
         // contents_under() will return no surface when the hot corner should trigger, so
         // pointer.motion() will set the current focus to None.
-        if under.hot_corner && pointer.current_focus().is_none() {
-            if !was_inside_hot_corner
-                && pointer
-                    .with_grab(|_, grab| grab_allows_hot_corner(grab))
-                    .unwrap_or(true)
-            {
-                self.niri.layout.toggle_overview();
+        if let Some(hot_corner) = under.hot_corner {
+            if pointer.current_focus().is_none() {
+                let push_old = self.niri.hot_corner_push.unwrap_or_default();
+                let push_new = push_old + delta;
+
+                let push_threshold = {
+                    let config = self.niri.config.borrow();
+                    match self
+                        .niri
+                        .hot_corners_for_output(under.output.as_ref().unwrap(), &config)
+                        .push_threshold
+                    {
+                        Some(val) => val.0,
+                        None => HOT_CORNER_PUSH_THRESHOLD,
+                    }
+                };
+
+                // the push will always be towards the corner (otherwise it wouldn't be in the
+                // corner), so we only need to check the size
+                let push_size = push_new.to_size_abs();
+                if (push_size.w >= push_threshold || push_size.h >= push_threshold)
+                    && !self.niri.hot_corner_triggered
+                    && pointer
+                        .with_grab(|_, grab| grab_allows_hot_corner(grab))
+                        .unwrap_or(true)
+                {
+                    let action = self
+                        .niri
+                        .hot_corner_action(under.output.as_ref().unwrap(), &hot_corner)
+                        .unwrap_or(DEFAULT_HOT_CORNER_ACTION);
+
+                    self.do_action(action, false);
+                    self.niri.hot_corner_triggered = true;
+                }
+
+                self.niri.hot_corner_push = Some(push_new);
+                self.niri.pointer_inside_hot_corner = under.hot_corner;
             }
-            self.niri.pointer_inside_hot_corner = true;
         }
 
         // Activate a new confinement if necessary.
@@ -2665,7 +2703,7 @@ impl State {
     ) {
         let was_inside_hot_corner = self.niri.pointer_inside_hot_corner;
         // Any of the early returns here mean that the pointer is not inside the hot corner.
-        self.niri.pointer_inside_hot_corner = false;
+        self.niri.pointer_inside_hot_corner = None;
 
         let Some(pos) = self.compute_absolute_location(&event, None).or_else(|| {
             self.global_bounding_rectangle().map(|output_geo| {
@@ -2714,17 +2752,30 @@ impl State {
 
         pointer.frame(self);
 
+        if under.hot_corner != was_inside_hot_corner {
+            self.niri.hot_corner_triggered = false;
+            self.niri.hot_corner_push = None;
+        }
+
         // contents_under() will return no surface when the hot corner should trigger, so
         // pointer.motion() will set the current focus to None.
-        if under.hot_corner && pointer.current_focus().is_none() {
-            if !was_inside_hot_corner
-                && pointer
-                    .with_grab(|_, grab| grab_allows_hot_corner(grab))
-                    .unwrap_or(true)
-            {
-                self.niri.layout.toggle_overview();
+        if let Some(hot_corner) = under.hot_corner {
+            if pointer.current_focus().is_none() {
+                if !self.niri.hot_corner_triggered
+                    && pointer
+                        .with_grab(|_, grab| grab_allows_hot_corner(grab))
+                        .unwrap_or(true)
+                {
+                    let action = self
+                        .niri
+                        .hot_corner_action(&under.output.unwrap(), &hot_corner)
+                        .unwrap_or(DEFAULT_HOT_CORNER_ACTION);
+
+                    self.do_action(action, false);
+                    self.niri.hot_corner_triggered = true;
+                }
+                self.niri.pointer_inside_hot_corner = under.hot_corner;
             }
-            self.niri.pointer_inside_hot_corner = true;
         }
 
         self.niri.maybe_activate_pointer_constraint();

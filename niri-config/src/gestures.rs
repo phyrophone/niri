@@ -1,14 +1,21 @@
-use crate::utils::MergeWith;
-use crate::FloatOrInt;
+use knuffel::ast::SpannedNode;
+use knuffel::decode::Context;
+use knuffel::errors::DecodeError;
+use knuffel::traits::ErrorSpan;
 
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
+use crate::utils::{expect_only_children, MergeWith};
+use crate::{Action, FloatOrInt};
+
+pub const HOT_CORNER_PUSH_THRESHOLD: f64 = 100.;
+
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Gestures {
     pub dnd_edge_view_scroll: DndEdgeViewScroll,
     pub dnd_edge_workspace_switch: DndEdgeWorkspaceSwitch,
     pub hot_corners: HotCorners,
 }
 
-#[derive(knuffel::Decode, Debug, Default, Clone, Copy, PartialEq)]
+#[derive(knuffel::Decode, Debug, Default, Clone, PartialEq)]
 pub struct GesturesPart {
     #[knuffel(child)]
     pub dnd_edge_view_scroll: Option<DndEdgeViewScrollPart>,
@@ -97,16 +104,55 @@ impl MergeWith<DndEdgeWorkspaceSwitchPart> for DndEdgeWorkspaceSwitch {
     }
 }
 
-#[derive(knuffel::Decode, Debug, Default, Clone, Copy, PartialEq)]
+#[derive(knuffel::Decode, Debug, Clone, PartialEq)]
 pub struct HotCorners {
     #[knuffel(child)]
     pub off: bool,
+    #[knuffel(child, unwrap(argument))]
+    pub push_threshold: Option<FloatOrInt<0, 1_000_000>>,
     #[knuffel(child)]
-    pub top_left: bool,
+    pub top_left: Option<HotCorner>,
     #[knuffel(child)]
-    pub top_right: bool,
+    pub top_right: Option<HotCorner>,
     #[knuffel(child)]
-    pub bottom_left: bool,
+    pub bottom_left: Option<HotCorner>,
     #[knuffel(child)]
-    pub bottom_right: bool,
+    pub bottom_right: Option<HotCorner>,
+}
+
+impl Default for HotCorners {
+    fn default() -> Self {
+        Self {
+            off: false,
+            push_threshold: Some(FloatOrInt(HOT_CORNER_PUSH_THRESHOLD)),
+            top_left: Some(HotCorner::Default),
+            top_right: None,
+            bottom_left: None,
+            bottom_right: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum HotCorner {
+    Default,
+    Custom(Action),
+}
+
+impl<S: ErrorSpan> knuffel::Decode<S> for HotCorner {
+    fn decode_node(node: &SpannedNode<S>, ctx: &mut Context<S>) -> Result<Self, DecodeError<S>> {
+        expect_only_children(node, ctx);
+        let mut children = node.children();
+        let Some(action) = children.next() else {
+            return Ok(Self::Default);
+        };
+        for unwanted in children {
+            ctx.emit_error(DecodeError::unexpected(
+                unwanted,
+                "node",
+                "only one action per corner is allowed",
+            ));
+        }
+        Action::decode_node(action, ctx).map(Self::Custom)
+    }
 }

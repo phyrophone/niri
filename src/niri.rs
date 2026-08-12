@@ -14,9 +14,10 @@ use _server_decoration::server::org_kde_kwin_server_decoration_manager::Mode as 
 use anyhow::{bail, ensure, Context};
 use calloop::futures::Scheduler;
 use niri_config::debug::PreviewRender;
+use niri_config::gestures::HotCorners;
 use niri_config::output::MaxBpc;
 use niri_config::{
-    Config, FloatOrInt, Key, Modifiers, OutputName, TrackLayout, WarpMouseToFocusMode,
+    Action, Config, FloatOrInt, Key, Modifiers, OutputName, TrackLayout, WarpMouseToFocusMode,
     WorkspaceReference, Xkb,
 };
 use smithay::backend::allocator::Fourcc;
@@ -368,7 +369,9 @@ pub struct Niri {
     /// Used for limiting the notify to once per iteration, so that it's not spammed with high
     /// resolution mice.
     pub notified_activity_this_iteration: bool,
-    pub pointer_inside_hot_corner: bool,
+    pub pointer_inside_hot_corner: Option<HotCorner>,
+    pub hot_corner_push: Option<Point<f64, Logical>>,
+    pub hot_corner_triggered: bool,
     pub tablet_cursor_location: Option<Point<f64, Logical>>,
     pub gesture_swipe_3f_cumulative: Option<(f64, f64)>,
     pub overview_scroll_swipe_gesture: ScrollSwipeGesture,
@@ -538,7 +541,7 @@ pub struct PointContents {
     // If surface belongs to a layer surface, this is that layer surface.
     pub layer: Option<LayerSurface>,
     // Pointer is over a hot corner.
-    pub hot_corner: bool,
+    pub hot_corner: Option<HotCorner>,
 }
 
 #[derive(Debug, Default)]
@@ -559,6 +562,14 @@ pub enum LockRenderState {
     Unlocked,
     /// The output displays a locked frame.
     Locked,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum HotCorner {
+    TopLeft,
+    BottomLeft,
+    TopRight,
+    BottomRight,
 }
 
 // Not related to the one in Smithay.
@@ -2590,7 +2601,9 @@ impl Niri {
             pointer_inactivity_timer: None,
             pointer_inactivity_timer_got_reset: false,
             notified_activity_this_iteration: false,
-            pointer_inside_hot_corner: false,
+            pointer_inside_hot_corner: None,
+            hot_corner_push: None,
+            hot_corner_triggered: false,
             tablet_cursor_location: None,
             gesture_swipe_3f_cumulative: None,
             overview_scroll_swipe_gesture: ScrollSwipeGesture::new(),
@@ -3066,18 +3079,21 @@ impl Niri {
 
         Some((output, pos_within_output))
     }
-
-    fn is_inside_hot_corner(&self, output: &Output, pos: Point<f64, Logical>) -> bool {
-        let config = self.config.borrow();
-        let hot_corners = output
+    pub fn hot_corners_for_output<'a>(&self, output: &Output, config: &'a Config) -> &'a HotCorners {
+        output
             .user_data()
             .get::<OutputName>()
             .and_then(|name| config.outputs.find(name))
-            .and_then(|c| c.hot_corners)
-            .unwrap_or(config.gestures.hot_corners);
+            .and_then(|c| c.hot_corners.as_ref())
+            .unwrap_or(&config.gestures.hot_corners)
+    }
+
+    fn is_inside_hot_corner(&self, output: &Output, pos: Point<f64, Logical>) -> Option<HotCorner> {
+        let config = self.config.borrow();
+        let hot_corners = self.hot_corners_for_output(output, &config);
 
         if hot_corners.off {
-            return false;
+            return None;
         }
 
         // Use size from the ceiled output geometry, since that's what we currently use for pointer
@@ -3089,25 +3105,46 @@ impl Niri {
             Rectangle::new(corner, Size::new(1., 1.)).contains(pos)
         };
 
-        if hot_corners.top_right && contains(Point::new(size.w - 1., 0.)) {
-            return true;
+        if hot_corners.top_right.is_some() && contains(Point::new(size.w - 1., 0.)) {
+            return Some(HotCorner::TopRight);
         }
-        if hot_corners.bottom_left && contains(Point::new(0., size.h - 1.)) {
-            return true;
+        if hot_corners.bottom_left.is_some() && contains(Point::new(0., size.h - 1.)) {
+            return Some(HotCorner::BottomLeft);
         }
-        if hot_corners.bottom_right && contains(Point::new(size.w - 1., size.h - 1.)) {
-            return true;
+        if hot_corners.bottom_right.is_some() && contains(Point::new(size.w - 1., size.h - 1.)) {
+            return Some(HotCorner::BottomRight);
         }
 
         // If the user didn't explicitly set any corners, we default to top-left.
-        if (hot_corners.top_left
-            || !(hot_corners.top_right || hot_corners.bottom_right || hot_corners.bottom_left))
+        if (hot_corners.top_left.is_some()
+            || !(hot_corners.top_right.is_some()
+                || hot_corners.bottom_right.is_some()
+                || hot_corners.bottom_left.is_some()))
             && contains(Point::new(0., 0.))
         {
-            return true;
+            return Some(HotCorner::TopLeft);
         }
 
-        false
+        None
+    }
+
+    pub fn hot_corner_action(&self, output: &Output, corner: &HotCorner) -> Option<Action> {
+        let config = self.config.borrow();
+        let corners = self.hot_corners_for_output(output, &config);
+
+        let opt = match corner {
+            HotCorner::TopLeft => &corners.top_left,
+            HotCorner::BottomLeft => &corners.bottom_left,
+            HotCorner::TopRight => &corners.top_right,
+            HotCorner::BottomRight => &corners.bottom_right,
+        };
+        match opt {
+            Some(hc) => match hc {
+                niri_config::gestures::HotCorner::Default => None,
+                niri_config::gestures::HotCorner::Custom(action) => Some(action.clone()),
+            },
+            None => None,
+        }
     }
 
     pub fn is_sticky_obscured_under(
@@ -3153,7 +3190,10 @@ impl Niri {
             return false;
         }
 
-        if self.is_inside_hot_corner(output, pos_within_output) {
+        if self
+            .is_inside_hot_corner(output, pos_within_output)
+            .is_some()
+        {
             return true;
         }
 
@@ -3430,8 +3470,8 @@ impl Niri {
                 .or_else(|| layer_toplevel_under(Layer::Bottom))
                 .or_else(|| layer_toplevel_under(Layer::Background));
         } else {
-            if self.is_inside_hot_corner(output, pos_within_output) {
-                rv.hot_corner = true;
+            if let Some(corner) = self.is_inside_hot_corner(output, pos_within_output) {
+                rv.hot_corner = Some(corner);
                 return rv;
             }
 
